@@ -1,0 +1,9 @@
+node_modules/
+ios/
+build/
+Payload/
+*.ipa
+.netlify/*
+!.netlify/results.md
+.DS_Store
+android/

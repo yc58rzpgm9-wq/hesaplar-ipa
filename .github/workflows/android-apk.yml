@@ -1,0 +1,104 @@
+# Hesaplar Android APK — GitHub Actions ile derlenir (kendi bilgisayarında Android SDK gerekmez).
+# Çıktı: Actions sayfasındaki Artifacts bölümünde Hesaplar-apk / Hesaplar.apk
+name: Android APK oluştur
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "www/**"
+      - "capacitor.config.json"
+      - "package.json"
+      - ".github/workflows/android-apk.yml"
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      LIVE_SITE: https://celiksut.netlify.app
+    steps:
+      - name: Kodu indir
+        uses: actions/checkout@v4
+
+      - name: Node.js kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Java 21 kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Uygulama dosyalarını hazırla
+        run: |
+          set -euo pipefail
+          if [ ! -f www/index.html ]; then
+            echo "www/ yok, canlı siteden indiriliyor: $LIVE_SITE"
+            mkdir -p www
+            for f in index.html sync-store.js manifest.webmanifest app-icon.svg service-worker.js; do
+              curl -fsSL "$LIVE_SITE/$f" -o "www/$f"
+            done
+            sed -i -e '/\/\.netlify\/scripts\//d' -e '/og:image/d' www/index.html
+            sed -i -E "s#(var PRODUCTION_ORIGIN = )'[^']*'#\1'$LIVE_SITE'#" www/sync-store.js
+          fi
+          rm -rf www/kurulum.html www/indir
+          grep -q "PRODUCTION_ORIGIN = '$LIVE_SITE'" www/sync-store.js \
+            || { echo "sync-store.js içinde PRODUCTION_ORIGIN beklenen adres değil"; exit 1; }
+
+          if [ ! -f package.json ]; then
+            cat > package.json <<'JSON'
+          {
+            "name": "celikler-hesaplar",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/android": "^7.4.0",
+              "@capacitor/core": "^7.4.0"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "^7.4.0"
+            }
+          }
+          JSON
+          fi
+          if [ ! -f capacitor.config.json ]; then
+            cat > capacitor.config.json <<'JSON'
+          {
+            "appId": "com.celikler.hesaplar",
+            "appName": "Hesaplar",
+            "webDir": "www",
+            "backgroundColor": "#f4f1ea"
+          }
+          JSON
+          fi
+
+      - name: Bağımlılıkları yükle
+        run: npm install --no-audit --no-fund
+
+      - name: Android projesini oluştur
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: APK derle (debug, imzalı)
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: APK'yı adlandır
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk out/Hesaplar.apk
+          ls -lh out/Hesaplar.apk
+
+      - name: APK dosyasını yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hesaplar-apk
+          path: out/Hesaplar.apk
+          retention-days: 30

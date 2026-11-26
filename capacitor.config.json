@@ -1,0 +1,13 @@
+{
+  "appId": "com.celikler.hesaplar",
+  "appName": "Hesaplar",
+  "webDir": "www",
+  "backgroundColor": "#f4f1ea",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#f4f1ea"
+  },
+  "android": {
+    "backgroundColor": "#f4f1ea"
+  }
+}

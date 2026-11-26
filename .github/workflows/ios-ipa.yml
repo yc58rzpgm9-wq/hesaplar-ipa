@@ -1,0 +1,155 @@
+# Hesaplar iOS IPA — tek başına çalışan iş akışı.
+# Bu dosya, depoda başka hiçbir dosya olmasa da çalışır: eksik olan HTML dosyaları
+# https://celiksut.netlify.app adresinden indirilir, simge ve ayarlar burada üretilir.
+# Depoda www/, resources/, package.json varsa onlar kullanılır.
+name: iOS IPA oluştur
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "www/**"
+      - "resources/**"
+      - "capacitor.config.json"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/ios-ipa.yml"
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      LIVE_SITE: https://celiksut.netlify.app
+    steps:
+      - name: Kodu indir
+        uses: actions/checkout@v4
+
+      - name: Node.js kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Xcode 16 seç
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16"
+
+      - name: Uygulama dosyalarını hazırla
+        run: |
+          set -euo pipefail
+          if [ ! -f www/index.html ]; then
+            echo "www/ yok, canlı siteden indiriliyor: $LIVE_SITE"
+            mkdir -p www
+            for f in index.html sync-store.js manifest.webmanifest app-icon.svg service-worker.js; do
+              curl -fsSL "$LIVE_SITE/$f" -o "www/$f"
+            done
+            # Netlify'ın eklediği betikleri ve paylaşım görselini kaldır.
+            sed -i '' -e '/\/\.netlify\/scripts\//d' -e '/og:image/d' www/index.html
+            # Telefonda kayıtlar çalışan eşitleme servisine gitsin.
+            sed -i '' -E "s#(var PRODUCTION_ORIGIN = )'[^']*'#\1'$LIVE_SITE'#" www/sync-store.js
+          fi
+          # Kurulum ve indirme sayfaları yalnızca web sürümü içindir.
+          rm -rf www/kurulum.html www/indir
+          grep -q "PRODUCTION_ORIGIN = '$LIVE_SITE'" www/sync-store.js \
+            || { echo "sync-store.js içinde PRODUCTION_ORIGIN beklenen adres değil"; exit 1; }
+
+          if [ ! -f package.json ]; then
+            cat > package.json <<'EOF'
+          {
+            "name": "celikler-hesaplar",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor-community/contacts": "^7.2.0",
+              "@capacitor/core": "^7.4.0",
+              "@capacitor/ios": "^7.4.0"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "^7.4.0"
+            }
+          }
+          EOF
+          fi
+          if [ ! -f capacitor.config.json ]; then
+            cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.celikler.hesaplar",
+            "appName": "Hesaplar",
+            "webDir": "www",
+            "backgroundColor": "#f4f1ea",
+            "ios": { "contentInset": "never", "backgroundColor": "#f4f1ea" }
+          }
+          EOF
+          fi
+
+      - name: Bağımlılıkları yükle
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+
+      - name: Simge ve açılış ekranını hazırla
+        run: |
+          set -euo pipefail
+          if [ -f resources/icon-1024.png ] && [ -f resources/splash-2732.png ]; then
+            echo "resources/ içindeki görseller kullanılıyor"
+            exit 0
+          fi
+          mkdir -p resources /tmp/img
+          npm install --prefix /tmp/img --no-audit --no-fund sharp@0.34
+          cat > /tmp/img/make.cjs <<'EOF'
+          const sharp = require('/tmp/img/node_modules/sharp');
+          (async () => {
+            const svg = await require('fs').promises.readFile('www/app-icon.svg');
+            // Köşeler iOS tarafından yuvarlatılır; simge kare ve opak olmalı.
+            await sharp(svg, { density: 300 }).resize(1024, 1024)
+              .flatten({ background: '#2f6f4f' }).png().toFile('resources/icon-1024.png');
+            const logo = await sharp(svg, { density: 300 }).resize(640, 640).png().toBuffer();
+            await sharp({ create: { width: 2732, height: 2732, channels: 3, background: '#f4f1ea' } })
+              .composite([{ input: logo, gravity: 'center' }]).png().toFile('resources/splash-2732.png');
+          })().catch((e) => { console.error(e); process.exit(1); });
+          EOF
+          node /tmp/img/make.cjs
+
+      - name: iOS projesini oluştur
+        run: |
+          npx cap add ios
+          npx cap sync ios
+
+      - name: Simge, açılış ekranı ve izin metinleri
+        run: |
+          ASSETS=ios/App/App/Assets.xcassets
+          cp resources/icon-1024.png "$ASSETS/AppIcon.appiconset/AppIcon-512@2x.png"
+          for f in "$ASSETS"/Splash.imageset/*.png; do cp resources/splash-2732.png "$f"; done
+          PLIST=ios/App/App/Info.plist
+          /usr/libexec/PlistBuddy -c "Add :NSContactsUsageDescription string Üreticinin WhatsApp numarasını rehberden seçmek için kullanılır." "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :NSFaceIDUsageDescription string Uygulamayı Face ID ile açmak için kullanılır." "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST"
+
+      - name: Derle (imzasız)
+        run: |
+          xcodebuild \
+            -workspace ios/App/App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath build/App.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            archive
+
+      - name: IPA paketle
+        run: |
+          mkdir -p Payload
+          cp -R build/App.xcarchive/Products/Applications/App.app Payload/
+          zip -qr Hesaplar.ipa Payload
+          ls -lh Hesaplar.ipa
+
+      - name: IPA dosyasını yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hesaplar-ipa
+          path: Hesaplar.ipa
+          retention-days: 30
